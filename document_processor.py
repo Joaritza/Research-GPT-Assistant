@@ -38,7 +38,7 @@ class DocumentProcessor:
         self.document_vectors = None  # Store TF-IDF vectors
         self.chunk_to_doc_mapping = []  # Map chunk index to document ID
         self.all_chunks = []  # Store all text chunks for vectorization
-        
+
     def extract_text_from_pdf(self, pdf_path):
         """
         Extract text from PDF file
@@ -58,6 +58,16 @@ class DocumentProcessor:
         # TODO: Implement PDF text extraction
         extracted_text = ""
         # Your implementation here
+        from PyPDF2 import PdfReader
+
+        try:
+            with open(pdf_path, 'rb') as file:
+                reader = PdfReader(file)
+            for page in reader.pages:
+                extracted_text += page.extract_text() + "\n"
+        except Exception as e:
+            print(f"Error extracting text from {pdf_path}: {e}")
+            extracted_text = ""
         return extracted_text
     
     def preprocess_text(self, text):
