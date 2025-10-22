@@ -198,6 +198,44 @@ class DocumentProcessor:
 
         return doc_id
     
+    def _extract_metadata(self, text, pdf_path):
+        """
+        Extract basic metadata from text or PDF file
+
+        Args:
+            text (str): Extracted text from PDF
+            pdf_path (str): Path to PDF file
+
+        Returns:
+            dict: Metadata dictionary
+        """
+        metadata = {
+            'file_path': pdf_path,
+            'file_size': os.path.getsize(pdf_path) if os.path.exists(pdf_path) else 0,
+            'text_length': len(text)
+        }
+
+        # Attempt to extract title from first meaningful line
+        lines = text.split('\n')
+        title = None
+
+        for line in lines[:10]:  # Look at first 10 lines
+            line = line.strip()
+            if len(line) > 10 and len(line) < 200:  # Reasonable title length
+                # Skip lines that look like headers or page numbers
+                if not re.match(r'^[\d\s\.\-]+$', line):
+                    title = line
+                    break
+                
+        metadata['title'] = title if title else os.path.basename(pdf_path).replace('.pdf', '')
+
+        # Extract some basic text statistics
+        words = text.split()
+        metadata['word_count'] = len(words)
+        metadata['estimated_pages'] = len(words) // 250  # Rough estimate: 250 words per page
+
+        return metadata
+
     def build_search_index(self):
         """
         Build TF-IDF search index for all documents
@@ -211,6 +249,35 @@ class DocumentProcessor:
         # TODO: Build TF-IDF index
         all_chunks = []
         # Your implementation here
+        if not self.documents:
+            self.logger.warning("No documents to index.")
+            return
+        
+        self.logger.info("Building search index from document chunks...")
+
+        # Collect all chunks and map to document IDs
+        self.all_chunks = []
+        self.chunk_to_doc_mapping = []
+        
+        for doc_id, doc_data in self.documents.items():
+            for chunk in doc_data['chunks']:
+                self.all_chunks.append(chunk)
+                self.chunk_to_doc_mapping.append(doc_id)
+        if not self.all_chunks:
+            self.logger.warning("No chunks found in documents.")
+            return
+        
+        try:
+            # Fit TF-IDF vectorizer
+            self.document_vectors = self.vectorizer.fit_transform(self.all_chunks)
+                
+            self.logger.info(f"Successfully built search index.")
+            self.logger.info(f"  - Total chunks indexed: {len(self.all_chunks)}")
+            self.logger.info(f"  - Vocabulary size: {len(self.vectorizer.vocabulary_)}")
+            self.logger.info(f"  - TF-IDF vector shape: {self.document_vectors.shape}")
+
+        except Exception as e:
+                self.logger.error(f"Error building search index: {e}")    
         
     def find_similar_chunks(self, query, top_k=5):
         """
@@ -229,9 +296,40 @@ class DocumentProcessor:
             list: List of (chunk_text, similarity_score, doc_id) tuples
         """
         # TODO: Implement similarity search
-        similar_chunks = []
+        # similar_chunks = []
         # Your implementation here
-        return similar_chunks
+        if self.document_vectors is None:
+            self.logger.error("Search index not built. Call build_search_index() first.")
+            return []
+        
+        if not query.strip():
+            self.logger.warning("Empty query provided.")
+            return []
+        
+        try:
+            # Transform query to TF-IDF vector
+            query_vec = self.vectorizer.transform([query.lower()])
+            
+            # Compute cosine similarity
+            similarities = cosine_similarity(query_vec, self.document_vectors).flatten()
+            
+            # Get top_k indices of most similar chunks
+            top_indices = np.argsort(similarities)[::-1][:top_k]
+
+            # Prepare results
+            similar_chunks = []
+            for idx in top_indices:
+                if similarities[idx] > 0:  # Only include if similarity is greater than 0
+                    chunk_text = self.all_chunks[idx]
+                    score = similarities[idx]
+                    doc_id = self.chunk_to_doc_mapping[idx]
+                    similar_chunks.append((chunk_text, score, doc_id))
+            self.logger.info(f"Found {len(similar_chunks)} similar chunks for query: '{query[:50]}...'")
+
+            return similar_chunks
+        except Exception as e:
+            self.logger.error(f"Error during similarity search: {str(e)}")
+            return []
     
     def get_document_stats(self):
         """
@@ -246,4 +344,169 @@ class DocumentProcessor:
         # TODO: Calculate and return document statistics
         stats = {}
         # Your implementation here
+
+        if not self.documents:
+            self.logger.warning("No documents processed.")
+            return {
+                'num_documents': 0,
+                'total_chunks': 0,
+                'average_doc_length': 0,
+                'document_titles': []
+            }
+        
+        total_chunks = sum(doc['num_chunks'] for doc in self.documents.values())
+        total_length = sum(doc['processed_text_length'] for doc in self.documents.values())
+        num_documents = len(self.documents)
+        average_length = total_length / num_documents if num_documents > 0 else 0
+        titles = [doc['title'] for doc in self.documents.values()]
+
+        stats = {
+            'num_documents': num_documents,
+            'total_chunks': total_chunks,
+            'average_doc_length': average_length,
+            'total_text_length': total_length,
+            'document_titles': titles,
+            'document_ids': list(self.documents.keys()),
+            'average_chunks_per_doc': total_chunks / num_documents if num_documents > 0 else 0,
+            'vocabulary_size': len(self.vectorizer.vocabulary_) if self.vectorizer and hasattr(self.vectorizer, 'vocabulary_') else 0
+        }
+
         return stats
+
+    def search_within_document(self, doc_id, query, top_k=3):
+        """
+        Search for similar chunks within a specific document
+        
+        Args:
+            doc_id (str): Document identifier
+            query (str): Search query
+            top_k (int): Number of chunks to return
+            
+        Returns:
+            list: List of (chunk_text, similarity_score) tuples
+        """
+        if doc_id not in self.documents:
+            self.logger.error(f"Document {doc_id} not found")
+            return []
+        
+        doc_chunks = self.documents[doc_id]['chunks']
+        
+        if not doc_chunks:
+            return []
+        
+        try:
+            # Create temporary vectorizer for this document
+            temp_vectorizer = TfidfVectorizer(
+                stop_words='english',
+                ngram_range=(1, 2),
+                lowercase=True
+            )
+            
+            # Vectorize document chunks and query
+            chunk_vectors = temp_vectorizer.fit_transform(doc_chunks)
+            query_vector = temp_vectorizer.transform([query.lower()])
+            
+            # Calculate similarities
+            similarities = cosine_similarity(query_vector, chunk_vectors).flatten()
+            
+            # Get top results
+            top_indices = np.argsort(similarities)[::-1][:top_k]
+            
+            results = []
+            for idx in top_indices:
+                if similarities[idx] > 0:
+                    results.append((doc_chunks[idx], similarities[idx]))
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Error searching within document {doc_id}: {str(e)}")
+            return []
+        
+    def save_processed_documents(self, output_dir):
+        """
+        Save processed document data to files
+        
+        Args:
+            output_dir (str): Directory to save processed data
+        """
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        try:
+            # Save document metadata
+            metadata_file = os.path.join(output_dir, 'document_metadata.json')
+            import json
+            
+            # Prepare serializable metadata
+            serializable_docs = {}
+            for doc_id, doc_data in self.documents.items():
+                serializable_docs[doc_id] = {
+                    'title': doc_data['title'],
+                    'metadata': doc_data['metadata'],
+                    'file_path': doc_data['file_path'],
+                    'num_chunks': doc_data['num_chunks'],
+                    'raw_text_length': doc_data['raw_text_length'],
+                    'processed_text_length': doc_data['processed_text_length']
+                }
+            
+            with open(metadata_file, 'w') as f:
+                json.dump(serializable_docs, f, indent=2)
+            
+            # Save document statistics
+            stats_file = os.path.join(output_dir, 'document_stats.json')
+            with open(stats_file, 'w') as f:
+                json.dump(self.get_document_stats(), f, indent=2)
+            
+            # Save chunks for each document
+            for doc_id, doc_data in self.documents.items():
+                chunks_file = os.path.join(output_dir, f'{doc_id}_chunks.txt')
+                with open(chunks_file, 'w', encoding='utf-8') as f:
+                    for i, chunk in enumerate(doc_data['chunks']):
+                        f.write(f"--- Chunk {i+1} ---\n")
+                        f.write(chunk)
+                        f.write("\n\n")
+            
+            self.logger.info(f"Saved processed documents to {output_dir}")
+            
+        except Exception as e:
+            self.logger.error(f"Error saving processed documents: {str(e)}")
+
+# Example usage:
+if __name__ == "__main__":
+    # This section is for demonstration and testing purposes
+    from config import Config
+    import logging
+    logging.basicConfig(level=logging.INFO)
+
+    # Initialize configuration and document processor
+    config = Config()
+    processor = DocumentProcessor(config)
+
+    # Test with sample directory of PDFs
+    sample_dir = "/Users/carlos.stanton/Documents/Projects/AI/Adv class/research_gpt_assistant/data/sample_papers/"
+    if os.path.exists(sample_dir):
+        pdf_files = [f for f in os.listdir(sample_dir) if f.endswith('.pdf')]
+        print(f"Found {len(pdf_files)} PDF files in {sample_dir}")         
+        # Process each PDF
+        for pdf_file in pdf_files:
+            pdf_path = os.path.join(sample_dir, pdf_file)
+            print(f"Processing {pdf_path}...")
+            doc_id = processor.process_document(pdf_path)
+            print(f"Processed document ID: {doc_id}")
+
+        # Build search index
+        processor.build_search_index()
+
+        # Test search
+        results = processor.find_similar_chunks("machine learning algorithms", top_k=3)
+        for chunk, score, doc_id in results:
+            print(f"Doc: {doc_id}, Score: {score:.3f}, Chunk: {chunk[:100]}...\n")
+
+        # Print document stats
+        stats = processor.get_document_stats()
+        print("Document Statistics:")
+        for key, value in stats.items():
+            print(f"  {key}: {value}")
+    else:
+        print(f"Sample directory {sample_dir} does not exist. Please add sample PDFs to test.")
