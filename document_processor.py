@@ -15,6 +15,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import os
 import re
+import logging
 
 class DocumentProcessor:
     def __init__(self, config):
@@ -38,7 +39,9 @@ class DocumentProcessor:
         self.document_vectors = None  # Store TF-IDF vectors
         self.chunk_to_doc_mapping = []  # Map chunk index to document ID
         self.all_chunks = []  # Store all text chunks for vectorization
-
+        # Initialize logger
+        self.logger = logging.getLogger('DocumentProcessor')
+    
     def extract_text_from_pdf(self, pdf_path):
         """
         Extract text from PDF file
@@ -55,23 +58,80 @@ class DocumentProcessor:
         Returns:
             str: Extracted and cleaned text
         """
+        
+        from PyPDF2 import PdfReader
+
         # TODO: Implement PDF text extraction
         extracted_text = ""
         # Your implementation here
-        from PyPDF2 import PdfReader
-
         try:
+            # Open PDF file in binary mode
             with open(pdf_path, 'rb') as file:
-                reader = PdfReader(file)
-            for page in reader.pages:
-                extracted_text += page.extract_text() + "\n"
+                print(f"Extracting text from {pdf_path}...")
+                # Create PDF reader object
+                reader = PyPDF2.PdfReader(file)
+                
+                # Extract text from all pages
+                text = ""
+                for page in reader.pages:
+                    text += page.extract_text() + "\n"
+                    
+                # Clean the extracted text
+                # Remove multiple newlines
+                text = re.sub(r'\n\s*\n', '\n\n', text)
+                # Replace multiple spaces with single space
+                text = re.sub(r'\s+', ' ', text)
+                # Normalize paragraph breaks
+                text = re.sub(r'\n\n+', '\n\n', text)
+                
+                return text.strip()
+                
         except Exception as e:
-            print(f"Error extracting text from {pdf_path}: {e}")
-            extracted_text = ""
-        extracted_text = re.sub(r'\n\s*\n', '\n\n', text)  # Multiple newlines to double newline
-        extracted_text = re.sub(r'\s+', ' ', text)         # Multiple spaces to single space
-        extracted_text = re.sub(r'\n\n+', '\n\n', text)   # Multiple paragraph breaks to double newline
-        return extracted_text
+            print(f"Error extracting text from {'data/sample_papers'}: {str(e)}")
+            return ""
+        # Basic cleaning of extracted text
+        cleaned_text = self.clean_pdf_text(extracted_text)
+        return cleaned_text
+    
+    def _clean_pdf_text(self, text):
+        """
+        Clean text extracted from PDF to fix common issues
+        
+        Args:
+            text (str): Raw PDF text
+            
+        Returns:
+            str: Cleaned text
+        """
+        if not text:
+            return ""
+        
+        # Remove excessive whitespace and normalize line breaks
+        text = re.sub(r'\n\s*\n', '\n\n', text)  # Multiple newlines to double newline
+        text = re.sub(r'\s+', ' ', text)         # Multiple spaces to single space
+        text = re.sub(r'\n\n+', '\n\n', text)   # Multiple paragraph breaks to double newline
+        
+        # Remove common PDF artifacts
+        text = re.sub(r'\x0c', '', text)         # Form feed characters
+        text = re.sub(r'â€™', "'", text)         # Fix apostrophes
+        text = re.sub(r'â€œ|â€\x9d', '"', text)  # Fix quotes
+        text = re.sub(r'â€"', '-', text)         # Fix dashes
+        
+        # Remove page numbers and headers/footers (basic heuristic)
+        lines = text.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            # Skip very short lines that might be page numbers or artifacts
+            if len(line) < 3:
+                continue
+            # Skip lines that are just numbers (likely page numbers)
+            if line.isdigit():
+                continue
+            cleaned_lines.append(line)
+        
+        return '\n'.join(cleaned_lines)
     
     def preprocess_text(self, text):
         """
@@ -90,8 +150,10 @@ class DocumentProcessor:
             str: Preprocessed text
         """
         # TODO: Implement text preprocessing
-        cleaned_text = text
+        cleaned_text = text.lower()
         # Your implementation here
+        # Remove special characters but keep punctuation that's meaningful
+        # Keep periods, commas, question marks, exclamation marks
         cleaned_text = re.sub(r'[^\w\s\.\,\?\!\-\:\;\(\)]', ' ', cleaned_text)
         
         # Normalize whitespace
@@ -134,6 +196,37 @@ class DocumentProcessor:
         # TODO: Implement chunking logic
         chunks = []
         # Your implementation here
+        if not text or len(text) < chunk_size:
+            return [text] if text else []
+
+        start = 0
+        while start < len(text):
+            end = start + chunk_size
+            chunks.append(text[start:end])
+            # Calculate end position
+            end = start + chunk_size
+            # If this is not the last chunk, try to end at a sentence boundary
+            if end < len(text):
+                #Look for sentence ending in the last 200 characters of the chunk
+                sentence_end_pattern = r'[.!?]\s+'
+                search_start = max(end - 200, start)
+                #Find sentence boundaries in the search range
+                matches = list(re.finditer(sentence_end_pattern, text[search_start:end]))
+                if matches:
+                    #Use the last match to determine the end of the chunk
+                    last_match = matches[-1]
+                    end = search_start + last_match.end()
+            # Extract the chunk
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            # Move to the next chunk
+            start = end - overlap
+            # Ensure we don't get stuck in a loop
+            if start <= 0 or start >= len(text):
+                break
+            
+        self.logger.info(f"Successfully chunked text into {len(chunks)} chunks from text of length {len(text)}")
         return chunks
     
     def process_document(self, pdf_path):
@@ -155,7 +248,10 @@ class DocumentProcessor:
             str: Document ID
         """
         # TODO: Implement complete document processing pipeline
+     
         # Your implementation here
+        import logging
+        self.logger = logging.getLogger('DocumentProcessor')
         # Generate document ID from filename
         doc_id = os.path.basename(pdf_path).replace('.pdf', '')
         
@@ -195,7 +291,6 @@ class DocumentProcessor:
             self.logger.info(f"  - Number of chunks: {len(chunks)}")
         except Exception as e:
             self.logger.error(f"Error processing document {pdf_path}: {e}")
-
         return doc_id
     
     def _extract_metadata(self, text, pdf_path):
@@ -422,7 +517,14 @@ class DocumentProcessor:
         except Exception as e:
             self.logger.error(f"Error searching within document {doc_id}: {str(e)}")
             return []
-        
+
+    def get_document_by_id(self, doc_id):
+        # Return document data by ID (or None if not found).
+        if doc_id not in self.documents:
+            self.logger.warning(f"Requested document ID {doc_id} not found.")
+            return None
+        return self.documents[doc_id]
+
     def save_processed_documents(self, output_dir):
         """
         Save processed document data to files
@@ -472,6 +574,7 @@ class DocumentProcessor:
         except Exception as e:
             self.logger.error(f"Error saving processed documents: {str(e)}")
 
+'''
 # Example usage:
 if __name__ == "__main__":
     # This section is for demonstration and testing purposes
@@ -510,3 +613,4 @@ if __name__ == "__main__":
             print(f"  {key}: {value}")
     else:
         print(f"Sample directory {sample_dir} does not exist. Please add sample PDFs to test.")
+'''  
